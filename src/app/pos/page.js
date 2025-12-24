@@ -138,16 +138,13 @@ export default function POSPage() {
             const { data: { session } } = await supabase.auth.getSession();
             const userId = session?.user?.id;
 
-            // Calculate margin from cart items (price - cost) * quantity
             const totalMargin = cart.reduce((sum, item) => {
               const itemMargin = (item.unit_price - (item.unit_cost || 0)) * item.quantity;
               return sum + itemMargin;
             }, 0);
 
-                        // Get next sequential invoice number - same logic as ERP
                         let facturaNumber = null;
             
-                        // First try the RPC function (atomic, prevents duplicates)
                         const { data: rpcResult, error: rpcError } = await supabase.rpc('get_next_invoice_number', {
                           p_org_id: ORG_ID,
                           p_branch_id: BRANCH_ID
@@ -156,11 +153,28 @@ export default function POSPage() {
                         if (!rpcError && rpcResult) {
                           facturaNumber = String(rpcResult);
                         } else {
-                          // RPC failed, use fallback logic (same as ERP fallback)
-                          console.warn('RPC failed, using fallback:', rpcError);
+                          console.warn('RPC failed, using fallback with auto-sync:', rpcError);
               
                           try {
-                            // Try to get existing counter for this branch
+                            const { data: maxSale, error: maxError } = await supabase
+                              .from('sales')
+                              .select('factura')
+                              .eq('org_id', ORG_ID)
+                              .eq('branch_id', BRANCH_ID)
+                              .not('factura', 'is', null)
+                              .order('created_at', { ascending: false })
+                              .limit(100);
+
+                            let maxFromSales = 0;
+                            if (!maxError && maxSale && maxSale.length > 0) {
+                              for (const sale of maxSale) {
+                                const num = parseInt(sale.factura, 10);
+                                if (!isNaN(num) && num > maxFromSales) {
+                                  maxFromSales = num;
+                                }
+                              }
+                            }
+
                             const { data: counter, error: selectError } = await supabase
                               .from('invoice_counters')
                               .select('id, last_number')
@@ -168,31 +182,12 @@ export default function POSPage() {
                               .eq('branch_id', BRANCH_ID)
                               .maybeSingle();
 
-                            if (selectError || !counter) {
-                              // No counter exists, create one starting at 1
-                              const { data: newCounter, error: insertError } = await supabase
-                                .from('invoice_counters')
-                                .insert({ 
-                                  org_id: ORG_ID, 
-                                  branch_id: BRANCH_ID, 
-                                  last_number: 1,
-                                  prefix: '',
-                                  created_at: new Date().toISOString(),
-                                  updated_at: new Date().toISOString()
-                                })
-                                .select('last_number')
-                                .maybeSingle();
+                            const counterValue = counter?.last_number || 0;
+                            const baseNumber = Math.max(counterValue, maxFromSales);
+                            const newNumber = baseNumber + 1;
+                            facturaNumber = String(newNumber);
 
-                              if (insertError || !newCounter) {
-                                facturaNumber = '1';
-                              } else {
-                                facturaNumber = String(newCounter.last_number);
-                              }
-                            } else {
-                              // Counter exists, increment it
-                              const newNumber = (counter.last_number || 0) + 1;
-                              facturaNumber = String(newNumber);
-                  
+                            if (counter) {
                               await supabase
                                 .from('invoice_counters')
                                 .update({ 
@@ -200,10 +195,44 @@ export default function POSPage() {
                                   updated_at: new Date().toISOString() 
                                 })
                                 .eq('id', counter.id);
+                            } else {
+                              await supabase
+                                .from('invoice_counters')
+                                .insert({ 
+                                  org_id: ORG_ID, 
+                                  branch_id: BRANCH_ID, 
+                                  last_number: newNumber,
+                                  prefix: '',
+                                  created_at: new Date().toISOString(),
+                                  updated_at: new Date().toISOString()
+                                });
                             }
                           } catch (fallbackErr) {
                             console.warn('Fallback error:', fallbackErr);
-                            facturaNumber = '1';
+                            try {
+                              const { data: emergencySales } = await supabase
+                                .from('sales')
+                                .select('factura')
+                                .eq('org_id', ORG_ID)
+                                .eq('branch_id', BRANCH_ID)
+                                .not('factura', 'is', null)
+                                .order('created_at', { ascending: false })
+                                .limit(100);
+                              
+                              let maxNum = 0;
+                              if (emergencySales) {
+                                for (const sale of emergencySales) {
+                                  const num = parseInt(sale.factura, 10);
+                                  if (!isNaN(num) && num > maxNum) {
+                                    maxNum = num;
+                                  }
+                                }
+                              }
+                              facturaNumber = String(maxNum + 1);
+                            } catch {
+                              alert('Error: No se pudo obtener el número de factura. Por favor, intente de nuevo.');
+                              throw new Error('No se pudo sincronizar el número de factura');
+                            }
                           }
                         }
 
@@ -250,14 +279,13 @@ export default function POSPage() {
 
           if (itemsError) throw itemsError;
 
-                    // Create kardex entries for each item (inventory out)
                     const kardexEntries = cart.map(item => ({
                       org_id: ORG_ID,
                       product_id: item.product_id,
                       branch_id: BRANCH_ID,
                       movement_type: 'SALE',
                       reference: `Factura #${facturaNumber}`,
-                      quantity: -item.quantity, // Negative for sales
+                      quantity: -item.quantity,
                       cost_unit: item.unit_cost || 0,
                       total: Math.abs((item.unit_cost || 0) * item.quantity),
                       created_by: userId,
@@ -273,7 +301,6 @@ export default function POSPage() {
             console.warn('Error creando kardex:', kardexError);
           }
 
-                    // Create inventory_movements entries for each item
                     const inventoryMovements = cart.map(item => ({
                       org_id: ORG_ID,
                       product_id: item.product_id,
@@ -295,7 +322,6 @@ export default function POSPage() {
             console.warn('Error creando movimientos:', movementsError);
           }
 
-          // Update current_stock for each item (decrease stock)
           for (const item of cart) {
             const { error: stockError } = await supabase
               .from('current_stock')

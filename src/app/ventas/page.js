@@ -17,13 +17,17 @@ export default function VentasPage() {
   async function loadSales() {
     try {
       setLoading(true);
+      
+      // Get today's date in YYYY-MM-DD format for filtering
+      const today = new Date().toISOString().split('T')[0];
+      
       const { data, error } = await supabase
         .from('sales')
         .select('*')
         .eq('org_id', ORG_ID)
         .eq('branch_id', BRANCH_ID)
-        .order('created_at', { ascending: false })
-        .limit(50);
+        .eq('fecha', today)
+        .order('created_at', { ascending: false });
 
       if (error) throw error;
       setSales(data || []);
@@ -40,7 +44,7 @@ export default function VentasPage() {
   if (loading) {
     return (
       <div className="max-w-4xl mx-auto">
-        <h1 className="text-2xl font-bold text-gray-800 mb-4">Ventas</h1>
+        <h1 className="text-2xl font-bold text-gray-800 mb-4">Ventas del Día</h1>
         <div className="bg-white rounded-xl shadow-sm p-8 text-center text-gray-500">
           Cargando ventas...
         </div>
@@ -51,7 +55,7 @@ export default function VentasPage() {
   if (error) {
     return (
       <div className="max-w-4xl mx-auto">
-        <h1 className="text-2xl font-bold text-gray-800 mb-4">Ventas</h1>
+        <h1 className="text-2xl font-bold text-gray-800 mb-4">Ventas del Día</h1>
         <div className="bg-red-50 rounded-xl shadow-sm p-8 text-center text-red-600">
           Error: {error}
         </div>
@@ -61,7 +65,7 @@ export default function VentasPage() {
 
   return (
     <div className="max-w-4xl mx-auto">
-      <h1 className="text-2xl font-bold text-gray-800 mb-4">Ventas</h1>
+      <h1 className="text-2xl font-bold text-gray-800 mb-4">Ventas del Día</h1>
       
       {sales.length === 0 ? (
         <div className="bg-white rounded-xl shadow-sm p-8 text-center text-gray-500">
